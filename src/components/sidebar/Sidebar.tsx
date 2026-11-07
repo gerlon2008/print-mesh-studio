@@ -2,11 +2,13 @@
 
 import React, { useState } from "react";
 import * as THREE from "three";
-import { FolderOpen, Scissors, Palette, Download } from "lucide-react";
+import { FolderOpen, Sparkles, Scissors, Palette, Download } from "lucide-react";
 import { ImportTab } from "./ImportTab";
+import { TripoSegmentationTab } from "./TripoSegmentationTab";
 import { CuttingAndConnectorsTab } from "./CuttingAndConnectorsTab";
 import { ColorSegmentationTab } from "./ColorSegmentationTab";
 import { ExportTab } from "./ExportTab";
+import { TripoDetectedPart, SegmentationTier } from "../../utils/tripoSegmentation";
 import {
   CutPlaneConfig,
   ConnectorPin,
@@ -21,6 +23,17 @@ interface SidebarProps {
   setActiveTool: (tool: ActiveTool) => void;
   modelName: string;
   mainGeometry: THREE.BufferGeometry | null;
+  detectedParts: TripoDetectedPart[];
+  selectedPartId: string | null;
+  onSelectPart: (id: string | null) => void;
+  explodedDistance: number;
+  onChangeExplodedDistance: (dist: number) => void;
+  onRunTripoSegmentation: (tier: SegmentationTier) => void;
+  onUpdatePartColor: (partId: string, col: string) => void;
+  onTogglePartVisibility: (partId: string) => void;
+  onGenerateConnectorsBetweenParts: () => void;
+  onResetSegmentation: () => void;
+  isProcessingTripo: boolean;
   splitParts: SplitResultPart[] | null;
   colorRegions: ColorRegion[];
   stats: MeshStats | null;
@@ -48,23 +61,22 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = (props) => {
-  const [activeTab, setActiveTab] = useState<"import" | "cut" | "color" | "export">("import");
+  const [activeTab, setActiveTab] = useState<"import" | "tripo" | "cut" | "color" | "export">("tripo");
 
-  // Keep activeTool aligned when user switches tabs
-  const handleTabChange = (tab: "import" | "cut" | "color" | "export") => {
+  const handleTabChange = (tab: "import" | "tripo" | "cut" | "color" | "export") => {
     setActiveTab(tab);
     if (tab === "cut") props.setActiveTool("cut");
     else if (tab === "color") props.setActiveTool("paint");
-    else if (tab === "import" || tab === "export") props.setActiveTool("view");
+    else props.setActiveTool("view");
   };
 
   return (
-    <div className="w-84 md:w-96 h-full flex flex-col bg-zinc-950/95 border-l border-zinc-800 shrink-0 select-none">
-      {/* Tab Navigation Header */}
-      <div className="grid grid-cols-4 border-b border-zinc-800 bg-zinc-900/60 p-1 gap-1 text-[11px]">
+    <div className="w-88 md:w-96 h-full flex flex-col bg-zinc-950/95 border-l border-zinc-800 shrink-0 select-none">
+      {/* 5-Tab Navigation Header */}
+      <div className="grid grid-cols-5 border-b border-zinc-800 bg-zinc-900/60 p-1 gap-1 text-[10px]">
         <button
           onClick={() => handleTabChange("import")}
-          className={`flex flex-col items-center gap-1 py-1.5 px-1 rounded-md font-medium transition-all ${
+          className={`flex flex-col items-center gap-1 py-1.5 px-0.5 rounded font-medium transition-all ${
             activeTab === "import"
               ? "bg-zinc-800 text-zinc-100 shadow-sm"
               : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -76,34 +88,47 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         </button>
 
         <button
+          onClick={() => handleTabChange("tripo")}
+          className={`flex flex-col items-center gap-1 py-1.5 px-0.5 rounded font-medium transition-all ${
+            activeTab === "tripo"
+              ? "bg-cyan-950/80 text-cyan-200 border border-cyan-800 shadow-sm"
+              : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
+          }`}
+          title="Detección de Partes (Tripo AI)"
+        >
+          <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+          <span>Partes IA</span>
+        </button>
+
+        <button
           onClick={() => handleTabChange("cut")}
-          className={`flex flex-col items-center gap-1 py-1.5 px-1 rounded-md font-medium transition-all ${
+          className={`flex flex-col items-center gap-1 py-1.5 px-0.5 rounded font-medium transition-all ${
             activeTab === "cut"
               ? "bg-red-950/70 text-red-200 border border-red-800/80 shadow-sm"
               : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
           }`}
-          title="Plano de Corte y Pines"
+          title="Plano de Corte Slicer"
         >
           <Scissors className="w-3.5 h-3.5" />
-          <span>Corte & Pines</span>
+          <span>Corte</span>
         </button>
 
         <button
           onClick={() => handleTabChange("color")}
-          className={`flex flex-col items-center gap-1 py-1.5 px-1 rounded-md font-medium transition-all ${
+          className={`flex flex-col items-center gap-1 py-1.5 px-0.5 rounded font-medium transition-all ${
             activeTab === "color"
               ? "bg-blue-950/70 text-blue-200 border border-blue-800/80 shadow-sm"
               : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
           }`}
-          title="Segmentación de Color e IA"
+          title="Pintura Manual Smart Fill"
         >
           <Palette className="w-3.5 h-3.5" />
-          <span>Color & IA</span>
+          <span>Pintar</span>
         </button>
 
         <button
           onClick={() => handleTabChange("export")}
-          className={`flex flex-col items-center gap-1 py-1.5 px-1 rounded-md font-medium transition-all ${
+          className={`flex flex-col items-center gap-1 py-1.5 px-0.5 rounded font-medium transition-all ${
             activeTab === "export"
               ? "bg-emerald-950/70 text-emerald-200 border border-emerald-800/80 shadow-sm"
               : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -122,6 +147,23 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             onLoadGeometry={props.onLoadGeometry}
             isLoading={props.isLoadingFile}
             setIsLoading={props.setIsLoadingFile}
+          />
+        )}
+
+        {activeTab === "tripo" && (
+          <TripoSegmentationTab
+            detectedParts={props.detectedParts}
+            selectedPartId={props.selectedPartId}
+            onSelectPart={props.onSelectPart}
+            explodedDistance={props.explodedDistance}
+            onChangeExplodedDistance={props.onChangeExplodedDistance}
+            onRunTripoSegmentation={props.onRunTripoSegmentation}
+            onUpdatePartColor={props.onUpdatePartColor}
+            onTogglePartVisibility={props.onTogglePartVisibility}
+            onGenerateConnectorsBetweenParts={props.onGenerateConnectorsBetweenParts}
+            onResetSegmentation={props.onResetSegmentation}
+            isProcessing={props.isProcessingTripo}
+            totalTriangles={props.stats?.triangleCount || 0}
           />
         )}
 
@@ -161,7 +203,18 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           <ExportTab
             modelName={props.modelName}
             mainGeometry={props.mainGeometry}
-            splitParts={props.splitParts}
+            splitParts={
+              props.detectedParts.length > 0
+                ? props.detectedParts.map((p) => ({
+                    id: p.id,
+                    name: p.name.replace(/\s+/g, "_"),
+                    color: p.color,
+                    geometry: p.geometry,
+                    stats: p.stats,
+                    visible: p.visible,
+                  }))
+                : props.splitParts
+            }
             colorRegions={props.colorRegions}
             stats={props.stats}
           />

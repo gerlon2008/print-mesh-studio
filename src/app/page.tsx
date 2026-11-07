@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import * as THREE from "three";
-import { Box, Layers, Sparkles, HelpCircle } from "lucide-react";
+import { Box, Sparkles, HelpCircle, Layers, Sliders } from "lucide-react";
 import { ThreeViewer } from "../components/viewer/ThreeViewer";
 import { Toolbar } from "../components/ui/Toolbar";
 import { StatsBadge } from "../components/ui/StatsBadge";
@@ -24,6 +24,12 @@ import {
 } from "../utils/colorClustering";
 import { cutMeshWithPlane, applyConnectorsToParts } from "../utils/csgCutting";
 import { createMechanicalTestPiece } from "../utils/sampleModels";
+import {
+  detectPartsTripoStyle,
+  TripoDetectedPart,
+  SegmentationTier,
+} from "../utils/tripoSegmentation";
+import { generateDowelBetweenParts } from "../utils/jointConnectorGenerator";
 
 export default function Home() {
   // Model state
@@ -31,6 +37,11 @@ export default function Home() {
   const [mainGeometry, setMainGeometry] = useState<THREE.BufferGeometry | null>(null);
   const [originalGeometry, setOriginalGeometry] = useState<THREE.BufferGeometry | null>(null);
   const [stats, setStats] = useState<MeshStats | null>(null);
+
+  // Tripo AI Part Detection State
+  const [detectedParts, setDetectedParts] = useState<TripoDetectedPart[]>([]);
+  const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
+  const [isProcessingTripo, setIsProcessingTripo] = useState<boolean>(false);
 
   // Tools & View state
   const [activeTool, setActiveTool] = useState<ActiveTool>("view");
@@ -42,47 +53,35 @@ export default function Home() {
     axis: "z",
     offset: 10,
     angle: 0,
-    enabled: true,
-    visualize: true,
+    liveClipping: false,
   });
-  const [pins, setPins] = useState<ConnectorPin[]>([
-    {
-      id: "pin-1",
-      type: "cylinder",
-      radius: 2.5,
-      height: 8.0,
-      tolerance: 0.2,
-      position: [-10, 0],
-    },
-    {
-      id: "pin-2",
-      type: "cylinder",
-      radius: 2.5,
-      height: 8.0,
-      tolerance: 0.2,
-      position: [10, 0],
-    },
-  ]);
+  const [pins, setPins] = useState<ConnectorPin[]>([]);
   const [splitParts, setSplitParts] = useState<SplitResultPart[] | null>(null);
   const [isProcessingCSG, setIsProcessingCSG] = useState<boolean>(false);
 
   // Color Segmentation state
   const [colorRegions, setColorRegions] = useState<ColorRegion[]>([]);
   const [activeColor, setActiveColor] = useState<string>(DEFAULT_PALETTE[0]);
-  const [paintMode, setPaintMode] = useState<"brush" | "flood">("flood");
+  const [paintMode, setPaintMode] = useState<"brush" | "flood">("brush");
   const [floodAngleDeg, setFloodAngleDeg] = useState<number>(30);
+  const [brushSizeMm, setBrushSizeMm] = useState<number>(6);
   const [isProcessingKMeans, setIsProcessingKMeans] = useState<boolean>(false);
 
   // Loading state
   const [isLoadingFile, setIsLoadingFile] = useState<boolean>(false);
 
-  // Initialize with procedural sample piece on mount
+  // Initialize with procedural benchmark piece on mount
   useEffect(() => {
     const sampleGeom = createMechanicalTestPiece();
     const meshStats = computeMeshStats(sampleGeom);
     setMainGeometry(sampleGeom.clone());
     setOriginalGeometry(sampleGeom.clone());
     setStats(meshStats);
+
+    // Auto-run Tripo detection on initial load for instant wow factor!
+    const parts = detectPartsTripoStyle(sampleGeom, "balanced");
+    setDetectedParts(parts);
+    setExplodedDistance(18); // Show subtle exploded view right away
   }, []);
 
   // Handler for loaded/created geometries
@@ -96,14 +95,96 @@ export default function Home() {
     const newStats = computeMeshStats(geom);
     setStats(newStats);
 
-    // Adjust cut offset default to center
-    setCutConfig((prev) => ({
-      ...prev,
-      offset: 0,
-    }));
+    // Run Tripo detection on newly uploaded mesh
+    const parts = detectPartsTripoStyle(geom, "balanced");
+    setDetectedParts(parts);
+    if (parts.length > 1) {
+      setExplodedDistance(15);
+    }
   }, []);
 
-  // Execute CSG boolean cut with pin/socket generation
+  // Run Tripo AI style segmentation
+  const handleRunTripoSegmentation = useCallback(
+    (tier: SegmentationTier) => {
+      const targetGeom = originalGeometry || mainGeometry;
+      if (!targetGeom) return;
+
+      setIsProcessingTripo(true);
+      setTimeout(() => {
+        try {
+          const parts = detectPartsTripoStyle(targetGeom, tier);
+          setDetectedParts(parts);
+          setExplodedDistance(20); // Automatically trigger exploded view
+        } catch (err) {
+          console.error("Tripo segmentation failed:", err);
+        } finally {
+          setIsProcessingTripo(false);
+        }
+      }, 60);
+    },
+    [originalGeometry, mainGeometry]
+  );
+
+  const handleUpdatePartColor = (partId: string, newColor: string) => {
+    setDetectedParts((prev) =>
+      prev.map((p) => (p.id === partId ? { ...p, color: newColor } : p))
+    );
+  };
+
+  const handleTogglePartVisibility = (partId: string) => {
+    setDetectedParts((prev) =>
+      prev.map((p) => (p.id === partId ? { ...p, visible: !p.visible } : p))
+    );
+  };
+
+  const handleResetSegmentation = () => {
+    setDetectedParts([]);
+    setExplodedDistance(0);
+    setSelectedPartId(null);
+    if (originalGeometry) {
+      setMainGeometry(originalGeometry.clone());
+    }
+  };
+
+  // Generate dowel connector pins between neighboring detected parts
+  const handleGenerateConnectorsBetweenParts = useCallback(() => {
+    if (detectedParts.length < 2) return;
+
+    try {
+      // Pick the first two prominent adjacent parts
+      const partA = detectedParts[0];
+      const partB = detectedParts[1];
+
+      const res = generateDowelBetweenParts(partA, partB, 4.0, 10.0, 0.2);
+
+      const dowelStats = computeMeshStats(res.dowelGeometry);
+      const dowelPart: TripoDetectedPart = {
+        id: `dowel-${Date.now()}`,
+        name: "Pasador de Ensamble (Dowel 3D)",
+        color: "#ffffff",
+        geometry: res.dowelGeometry,
+        stats: dowelStats,
+        center: res.dowelPosition,
+        explosionVector: new THREE.Vector3(0, 0, 1),
+        visible: true,
+        selected: false,
+        contactNeighborIds: [partA.id, partB.id],
+      };
+
+      setDetectedParts((prev) => [
+        ...prev.map((p) => {
+          if (p.id === partA.id) return { ...p, geometry: res.updatedPartA };
+          if (p.id === partB.id) return { ...p, geometry: res.updatedPartB };
+          return p;
+        }),
+        dowelPart,
+      ]);
+    } catch (err) {
+      console.error("Connector generation failed:", err);
+    }
+  }, [detectedParts]);
+
+  // Execute CSG boolean cut
   const handleExecuteCut = useCallback(() => {
     const targetGeom = originalGeometry || mainGeometry;
     if (!targetGeom) return;
@@ -112,56 +193,45 @@ export default function Home() {
 
     setTimeout(() => {
       try {
-        // 1. Cut mesh in two solid halves using CSG
-        const cutResult = cutMeshWithPlane(targetGeom, cutConfig);
+        const cutResult = cutMeshWithPlane(targetGeom, {
+          axis: cutConfig.axis,
+          offset: cutConfig.offset,
+          angle: cutConfig.angle,
+          enabled: true,
+          visualize: true,
+        });
 
-        // 2. Add male pins and female cavity sockets with tolerance clearance
-        const finalParts = applyConnectorsToParts(
-          cutResult.partA,
-          cutResult.partB,
-          cutResult,
-          pins
-        );
-
-        // 3. Store split parts with individual stats
-        const partAStats = computeMeshStats(finalParts.partA);
-        const partBStats = computeMeshStats(finalParts.partB);
-
-        const meshA = new THREE.Mesh(finalParts.partA);
-        const meshB = new THREE.Mesh(finalParts.partB);
+        const partAStats = computeMeshStats(cutResult.partA);
+        const partBStats = computeMeshStats(cutResult.partB);
 
         setSplitParts([
           {
             id: "part-top-male",
-            name: "Parte_Superior_PinesMacho",
-            color: "#06b6d4", // Cyan
-            geometry: finalParts.partA,
-            mesh: meshA,
+            name: "Parte_Superior_Corte",
+            color: "#06b6d4",
+            geometry: cutResult.partA,
             stats: partAStats,
             visible: true,
           },
           {
             id: "part-bottom-female",
-            name: "Parte_Inferior_CajasHembra",
-            color: "#f59e0b", // Amber
-            geometry: finalParts.partB,
-            mesh: meshB,
+            name: "Parte_Inferior_Corte",
+            color: "#f59e0b",
+            geometry: cutResult.partB,
             stats: partBStats,
             visible: true,
           },
         ]);
 
-        // Auto apply initial exploded offset so user sees the cut and pins
-        setExplodedDistance(15);
+        setExplodedDistance(25);
       } catch (err) {
-        console.error("CSG Boolean operation failed:", err);
+        console.error("CSG cut failed:", err);
       } finally {
         setIsProcessingCSG(false);
       }
     }, 50);
-  }, [originalGeometry, mainGeometry, cutConfig, pins]);
+  }, [originalGeometry, mainGeometry, cutConfig]);
 
-  // Reset Cut
   const handleResetCut = () => {
     setSplitParts(null);
     setExplodedDistance(0);
@@ -180,8 +250,6 @@ export default function Home() {
         try {
           const regions = clusterMeshByKMeans(mainGeometry, k, nw, pw);
           setColorRegions(regions);
-
-          // Apply vertex colors to visualize in 3D
           const coloredGeom = applyColorsToGeometry(mainGeometry, regions);
           setMainGeometry(coloredGeom);
         } catch (err) {
@@ -194,12 +262,11 @@ export default function Home() {
     [mainGeometry]
   );
 
-  // Paint / Select Triangles via 3D Raycasting
-  const handleSelectTriangles = useCallback(
+  // Paint Triangles
+  const handlePaintTriangles = useCallback(
     (triangleIndices: number[]) => {
       if (!mainGeometry || triangleIndices.length === 0) return;
 
-      // Find or create region for the active color
       let existingRegion = colorRegions.find((r) => r.color === activeColor);
       let newRegions = [...colorRegions];
 
@@ -214,44 +281,17 @@ export default function Home() {
         newRegions.push(existingRegion);
       }
 
-      // Add indices avoiding duplicates
       const currentIndices = new Set(existingRegion.triangleIndices);
       triangleIndices.forEach((idx) => currentIndices.add(idx));
       existingRegion.triangleIndices = Array.from(currentIndices);
 
-      // Remove from any other regions if conflicting
-      newRegions = newRegions.map((reg) => {
-        if (reg.id === existingRegion!.id) return existingRegion!;
-        return {
-          ...reg,
-          triangleIndices: reg.triangleIndices.filter((idx) => !currentIndices.has(idx)),
-        };
-      });
-
       setColorRegions(newRegions);
-
-      // Re-apply vertex colors
       const coloredGeom = applyColorsToGeometry(mainGeometry, newRegions);
       setMainGeometry(coloredGeom);
     },
     [mainGeometry, colorRegions, activeColor]
   );
 
-  // Add pin by clicking on plane
-  const handleAddPinAtPosition = (pos: [number, number]) => {
-    const currentTolerance = pins.length > 0 ? pins[0].tolerance : 0.2;
-    const newPin: ConnectorPin = {
-      id: "pin-" + Date.now(),
-      type: "cylinder",
-      radius: 2.5,
-      height: 8.0,
-      tolerance: currentTolerance,
-      position: pos,
-    };
-    setPins([...pins, newPin]);
-  };
-
-  // Convert color regions into sub-meshes
   const handleConvertToSubMeshes = () => {
     if (!mainGeometry || colorRegions.length === 0) return;
     const subMeshes = splitGeometryIntoSubMeshes(mainGeometry, colorRegions);
@@ -263,7 +303,6 @@ export default function Home() {
         name: sub.region.name.replace(/\s+/g, "_"),
         color: sub.region.color,
         geometry: sub.geometry,
-        mesh: new THREE.Mesh(sub.geometry),
         stats: pStats,
         visible: sub.region.visible,
       };
@@ -315,19 +354,26 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-3 text-xs">
+          {detectedParts.length > 0 && (
+            <div className="flex items-center gap-1.5 bg-cyan-950/80 border border-cyan-800/80 px-2 py-0.5 rounded text-[11px] text-cyan-300 font-mono">
+              <Sparkles className="w-3 h-3 text-cyan-400" />
+              <span>{detectedParts.length} Partes Tripo Detectadas</span>
+            </div>
+          )}
+
           <div className="hidden sm:flex items-center gap-2 text-[11px] text-zinc-400 font-mono">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
             <span>WebGL 2.0 / CSG Engine</span>
           </div>
 
           <a
-            href="https://github.com"
+            href="https://github.com/gerlon2008/print-mesh-studio"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 transition-colors"
           >
             <HelpCircle className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Ayuda Slicer</span>
+            <span className="hidden md:inline">GitHub</span>
           </a>
         </div>
       </header>
@@ -342,7 +388,7 @@ export default function Home() {
             onSelectTool={setActiveTool}
             wireframe={wireframe}
             onToggleWireframe={() => setWireframe((v) => !v)}
-            hasSplitParts={!!splitParts && splitParts.length > 0}
+            hasSplitParts={detectedParts.length > 0 || (!!splitParts && splitParts.length > 0)}
             explodedDistance={explodedDistance}
             onChangeExplodedDistance={setExplodedDistance}
           />
@@ -351,18 +397,18 @@ export default function Home() {
           <div className="flex-1 relative overflow-hidden">
             <ThreeViewer
               mainGeometry={mainGeometry}
-              splitParts={splitParts}
-              colorRegions={colorRegions}
+              detectedParts={detectedParts}
+              selectedPartId={selectedPartId}
+              onSelectPart={setSelectedPartId}
+              explodedDistance={explodedDistance}
               activeTool={activeTool}
               cutConfig={cutConfig}
-              pins={pins}
-              explodedDistance={explodedDistance}
               wireframe={wireframe}
-              activeColor={activeColor}
+              activeFilamentColor={activeColor}
+              brushSizeMm={brushSizeMm}
               paintMode={paintMode}
-              floodAngleDeg={floodAngleDeg}
-              onSelectTriangles={handleSelectTriangles}
-              onAddPinAtPosition={handleAddPinAtPosition}
+              smartFillAngleDeg={floodAngleDeg}
+              onPaintTriangles={handlePaintTriangles}
             />
           </div>
 
@@ -376,6 +422,17 @@ export default function Home() {
           setActiveTool={setActiveTool}
           modelName={modelName}
           mainGeometry={mainGeometry}
+          detectedParts={detectedParts}
+          selectedPartId={selectedPartId}
+          onSelectPart={setSelectedPartId}
+          explodedDistance={explodedDistance}
+          onChangeExplodedDistance={setExplodedDistance}
+          onRunTripoSegmentation={handleRunTripoSegmentation}
+          onUpdatePartColor={handleUpdatePartColor}
+          onTogglePartVisibility={handleTogglePartVisibility}
+          onGenerateConnectorsBetweenParts={handleGenerateConnectorsBetweenParts}
+          onResetSegmentation={handleResetSegmentation}
+          isProcessingTripo={isProcessingTripo}
           splitParts={splitParts}
           colorRegions={colorRegions}
           stats={stats}

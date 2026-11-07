@@ -4,61 +4,57 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { createBuildPlate } from "./BuildPlate";
-import {
-  ActiveTool,
-  CutPlaneConfig,
-  ConnectorPin,
-  SplitResultPart,
-  ColorRegion,
-} from "../../types";
-import { floodFillFaceSelection } from "../../utils/colorClustering";
+import { TripoDetectedPart } from "../../utils/tripoSegmentation";
+import { CutPlaneConfig, ActiveTool } from "../../types";
 
 interface ThreeViewerProps {
   mainGeometry: THREE.BufferGeometry | null;
-  splitParts: SplitResultPart[] | null;
-  colorRegions: ColorRegion[];
+  detectedParts: TripoDetectedPart[];
+  selectedPartId: string | null;
+  onSelectPart: (id: string | null) => void;
+  explodedDistance: number;
   activeTool: ActiveTool;
   cutConfig: CutPlaneConfig;
-  pins: ConnectorPin[];
-  explodedDistance: number;
   wireframe: boolean;
-  activeColor: string;
-  paintMode: "brush" | "flood";
-  floodAngleDeg: number;
-  onSelectTriangles?: (indices: number[]) => void;
-  onAddPinAtPosition?: (pos: [number, number]) => void;
+  activeFilamentColor: string;
+  brushSizeMm: number;
+  paintMode: "brush" | "flood" | "bucket";
+  smartFillAngleDeg: number;
+  onPaintTriangles?: (faceIndices: number[]) => void;
 }
 
 export const ThreeViewer: React.FC<ThreeViewerProps> = ({
   mainGeometry,
-  splitParts,
-  colorRegions,
+  detectedParts,
+  selectedPartId,
+  onSelectPart,
+  explodedDistance,
   activeTool,
   cutConfig,
-  pins,
-  explodedDistance,
   wireframe,
-  activeColor,
+  activeFilamentColor,
+  brushSizeMm,
   paintMode,
-  floodAngleDeg,
-  onSelectTriangles,
-  onAddPinAtPosition,
+  smartFillAngleDeg,
+  onPaintTriangles,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
-  
-  // Dynamic 3D Objects
-  const modelGroupRef = useRef<THREE.Group>(new THREE.Group());
-  const cutPlaneMeshRef = useRef<THREE.Mesh | null>(null);
-  const pinPreviewGroupRef = useRef<THREE.Group>(new THREE.Group());
-  const buildPlateRef = useRef<THREE.Group | null>(null);
 
-  const [mouseCoord, setMouseCoord] = useState<{ x: number; y: number } | null>(null);
+  // Groups
+  const partsGroupRef = useRef<THREE.Group>(new THREE.Group());
+  const singleModelGroupRef = useRef<THREE.Group>(new THREE.Group());
+  const brushCursorMeshRef = useRef<THREE.Mesh | null>(null);
+  const cutPlaneVisualRef = useRef<THREE.Mesh | null>(null);
 
-  // Initialize Three.js Scene
+  // Interaction State
+  const [hoveredPartId, setHoveredPartId] = useState<string | null>(null);
+  const isPointerDownRef = useRef(false);
+
+  // Initialize Scene
   useEffect(() => {
     if (!containerRef.current) return;
     const container = containerRef.current;
@@ -67,23 +63,24 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
 
     // Scene
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0e0e11);
+    scene.background = new THREE.Color(0x09090b); // Zinc-950
     sceneRef.current = scene;
 
-    // Camera
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 2000);
+    // Camera (Z-Up for 3D Printing)
+    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 3000);
     camera.position.set(160, -180, 140);
-    camera.up.set(0, 0, 1); // Z is UP for 3D printing
+    camera.up.set(0, 0, 1);
     cameraRef.current = camera;
 
-    // Renderer
+    // Renderer with ACES tone mapping & shadow maps
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.1;
+    renderer.toneMappingExposure = 1.15;
+    renderer.localClippingEnabled = true;
     container.innerHTML = "";
     container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
@@ -92,48 +89,56 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-    controls.maxDistance = 1200;
-    controls.minDistance = 10;
     controls.target.set(0, 0, 25);
     controlsRef.current = controls;
 
-    // Lighting (Studio Setup for 3D printing slicer look)
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    // Lighting (Bambu Studio / Tripo Studio Look)
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.75);
     scene.add(ambientLight);
 
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x222230, 0.5);
-    hemiLight.position.set(0, 0, 200);
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x18181b, 0.6);
+    hemiLight.position.set(0, 0, 250);
     scene.add(hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
-    keyLight.position.set(120, -140, 200);
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.4);
+    keyLight.position.set(140, -150, 220);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.width = 2048;
     keyLight.shadow.mapSize.height = 2048;
-    keyLight.shadow.camera.near = 10;
-    keyLight.shadow.camera.far = 600;
+    keyLight.shadow.bias = -0.0005;
     const d = 160;
     keyLight.shadow.camera.left = -d;
     keyLight.shadow.camera.right = d;
     keyLight.shadow.camera.top = d;
     keyLight.shadow.camera.bottom = -d;
-    keyLight.shadow.bias = -0.0005;
     scene.add(keyLight);
 
-    const fillLight = new THREE.DirectionalLight(0x93c5fd, 0.4);
-    fillLight.position.set(-150, 150, 80);
-    scene.add(fillLight);
+    const rimLight = new THREE.DirectionalLight(0x38bdf8, 0.4);
+    rimLight.position.set(-160, 160, 100);
+    scene.add(rimLight);
 
     // Build Plate
     const buildPlate = createBuildPlate(250);
     scene.add(buildPlate);
-    buildPlateRef.current = buildPlate;
 
-    // Model Group & Pin Preview Group
-    scene.add(modelGroupRef.current);
-    scene.add(pinPreviewGroupRef.current);
+    // Add containers
+    scene.add(partsGroupRef.current);
+    scene.add(singleModelGroupRef.current);
 
-    // Render loop
+    // 3D Brush Cursor Ring (for Paint mode)
+    const ringGeom = new THREE.RingGeometry(0.5, 1.0, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.85,
+    });
+    const brushCursor = new THREE.Mesh(ringGeom, ringMat);
+    brushCursor.visible = false;
+    scene.add(brushCursor);
+    brushCursorMeshRef.current = brushCursor;
+
+    // Animation Loop
     let animId: number;
     const animate = () => {
       animId = requestAnimationFrame(animate);
@@ -142,7 +147,6 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
     };
     animate();
 
-    // Resize handler
     const handleResize = () => {
       if (!container || !renderer || !camera) return;
       const w = container.clientWidth;
@@ -161,194 +165,130 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
     };
   }, []);
 
-  // Update Model Geometry & Materials
+  // Update Rendered Meshes (Tripo Parts vs Single Model)
   useEffect(() => {
-    const group = modelGroupRef.current;
-    // Clear old meshes
-    while (group.children.length > 0) {
-      const child = group.children[0] as THREE.Mesh;
-      group.remove(child);
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) {
-        if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
-        else child.material.dispose();
-      }
+    const partsGroup = partsGroupRef.current;
+    const singleGroup = singleModelGroupRef.current;
+
+    // Clear previous
+    while (partsGroup.children.length > 0) {
+      partsGroup.remove(partsGroup.children[0]);
+    }
+    while (singleGroup.children.length > 0) {
+      singleGroup.remove(singleGroup.children[0]);
     }
 
-    // If we have split parts (after CSG cut)
-    if (splitParts && splitParts.length > 0) {
-      splitParts.forEach((part, index) => {
+    // 1. If Tripo AI parts are detected: Render individual modular parts with exploded offsets!
+    if (detectedParts.length > 0) {
+      detectedParts.forEach((part) => {
         if (!part.visible) return;
+
+        const isSelected = part.id === selectedPartId;
+        const isHovered = part.id === hoveredPartId;
 
         const mat = new THREE.MeshStandardMaterial({
           color: new THREE.Color(part.color),
           roughness: 0.35,
           metalness: 0.1,
           wireframe: wireframe,
+          emissive: isSelected
+            ? new THREE.Color(0x38bdf8)
+            : isHovered
+            ? new THREE.Color(0x27272a)
+            : new THREE.Color(0x000000),
+          emissiveIntensity: isSelected ? 0.45 : isHovered ? 0.25 : 0.0,
         });
 
         const mesh = new THREE.Mesh(part.geometry, mat);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
-        mesh.name = part.name;
+        mesh.userData = { partId: part.id };
 
-        // Apply exploded view translation
+        // Apply Tripo-style radial exploded view translation
         if (explodedDistance > 0) {
-          // Push Part A along positive cut direction, Part B along negative
-          const dir = index === 0 ? 1 : -1;
-          let offsetVec = new THREE.Vector3(0, 0, dir * explodedDistance);
-          if (cutConfig.axis === "x") offsetVec.set(dir * explodedDistance, 0, 0);
-          if (cutConfig.axis === "y") offsetVec.set(0, dir * explodedDistance, 0);
+          const offsetVec = part.explosionVector.clone().multiplyScalar(explodedDistance);
           mesh.position.copy(offsetVec);
         }
 
-        group.add(mesh);
+        partsGroup.add(mesh);
       });
       return;
     }
 
-    // Otherwise render main geometry
+    // 2. Otherwise render single base model
     if (!mainGeometry) return;
 
-    let mat: THREE.Material;
-    const hasVertexColors = mainGeometry.getAttribute("color") !== undefined;
+    const hasColors = mainGeometry.getAttribute("color") !== undefined;
+    const mat = new THREE.MeshStandardMaterial({
+      color: hasColors ? undefined : new THREE.Color(0x38bdf8),
+      vertexColors: hasColors,
+      roughness: 0.35,
+      metalness: 0.1,
+      wireframe: wireframe,
+    });
 
-    if (hasVertexColors) {
-      mat = new THREE.MeshStandardMaterial({
-        vertexColors: true,
-        roughness: 0.35,
-        metalness: 0.1,
-        wireframe: wireframe,
-      });
-    } else {
-      mat = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(0x38bdf8), // Cyan filament default
-        roughness: 0.35,
-        metalness: 0.1,
-        wireframe: wireframe,
-      });
-    }
+    const mesh = new THREE.Mesh(mainGeometry, mat);
+    mesh.name = "mainModelMesh";
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    singleGroup.add(mesh);
+  }, [detectedParts, selectedPartId, hoveredPartId, explodedDistance, mainGeometry, wireframe]);
 
-    const mainMesh = new THREE.Mesh(mainGeometry, mat);
-    mainMesh.castShadow = true;
-    mainMesh.receiveShadow = true;
-    mainMesh.name = "mainModelMesh";
-    group.add(mainMesh);
-
-    // Auto center geometry if needed
-    if (!mainGeometry.boundingBox) mainGeometry.computeBoundingBox();
-  }, [mainGeometry, splitParts, colorRegions, wireframe, explodedDistance, cutConfig.axis]);
-
-  // Update Cutting Plane Visualizer & Pin Previews
+  // Update Cutting Plane Visualizer
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
 
-    // Clean up previous cut plane
-    if (cutPlaneMeshRef.current) {
-      scene.remove(cutPlaneMeshRef.current);
-      cutPlaneMeshRef.current.geometry.dispose();
-      cutPlaneMeshRef.current = null;
+    if (cutPlaneVisualRef.current) {
+      scene.remove(cutPlaneVisualRef.current);
+      cutPlaneVisualRef.current.geometry.dispose();
+      cutPlaneVisualRef.current = null;
     }
 
-    // Clean up pin preview
-    const pinGroup = pinPreviewGroupRef.current;
-    while (pinGroup.children.length > 0) {
-      const c = pinGroup.children[0] as THREE.Mesh;
-      pinGroup.remove(c);
-      if (c.geometry) c.geometry.dispose();
-      if (c.material) (c.material as THREE.Material).dispose();
-    }
-
-    // Only render when cut tool or connectors tool is active and enabled
-    if ((activeTool === "cut" || activeTool === "connectors") && cutConfig.enabled) {
-      if (!mainGeometry) return;
+    if (activeTool === "cut" && mainGeometry) {
       if (!mainGeometry.boundingBox) mainGeometry.computeBoundingBox();
       const bbox = mainGeometry.boundingBox || new THREE.Box3();
       const center = new THREE.Vector3();
       bbox.getCenter(center);
       const size = new THREE.Vector3();
       bbox.getSize(size);
+      const span = Math.max(size.x, size.y, size.z) * 1.5;
 
-      const planeExtent = Math.max(size.x, size.y, size.z) * 1.5;
-
-      // Plane geometry
-      const planeGeom = new THREE.PlaneGeometry(planeExtent, planeExtent);
+      const planeGeom = new THREE.PlaneGeometry(span, span);
       const planeMat = new THREE.MeshStandardMaterial({
-        color: 0xef4444, // Red cutting sheet
+        color: 0xf43f5e, // Rose red
         transparent: true,
         opacity: 0.35,
         side: THREE.DoubleSide,
-        depthWrite: false,
         roughness: 0.2,
       });
 
       const planeMesh = new THREE.Mesh(planeGeom, planeMat);
-      planeMesh.name = "interactiveCutPlane";
-
-      // Position plane
-      const planePos = center.clone();
+      const p = center.clone();
       if (cutConfig.axis === "x") {
-        planePos.x += cutConfig.offset;
+        p.x += cutConfig.offset;
         planeMesh.rotation.y = Math.PI / 2;
       } else if (cutConfig.axis === "y") {
-        planePos.y += cutConfig.offset;
+        p.y += cutConfig.offset;
         planeMesh.rotation.x = Math.PI / 2;
       } else {
-        planePos.z += cutConfig.offset;
+        p.z += cutConfig.offset;
       }
+      planeMesh.position.copy(p);
 
-      if (cutConfig.angle !== 0) {
-        const rad = (cutConfig.angle * Math.PI) / 180;
-        planeMesh.rotateZ(rad);
-      }
-
-      planeMesh.position.copy(planePos);
-
-      // Frame outline
-      const edges = new THREE.EdgesGeometry(planeGeom);
-      const edgeLine = new THREE.LineSegments(
-        edges,
-        new THREE.LineBasicMaterial({ color: 0xf87171, linewidth: 2 })
+      const wire = new THREE.LineSegments(
+        new THREE.EdgesGeometry(planeGeom),
+        new THREE.LineBasicMaterial({ color: 0xfb7185, linewidth: 2 })
       );
-      planeMesh.add(edgeLine);
+      planeMesh.add(wire);
 
       scene.add(planeMesh);
-      cutPlaneMeshRef.current = planeMesh;
-
-      // Render connector pin previews on the plane
-      pins.forEach((pin) => {
-        // Male pin cylinder (cyan)
-        const maleGeom = new THREE.CylinderGeometry(pin.radius, pin.radius, pin.height, 24);
-        maleGeom.rotateX(Math.PI / 2);
-        const maleMat = new THREE.MeshStandardMaterial({
-          color: 0x06b6d4, // Cyan
-          roughness: 0.3,
-          wireframe: false,
-        });
-        const pinMesh = new THREE.Mesh(maleGeom, maleMat);
-        pinMesh.position.set(pin.position[0], pin.position[1], 0);
-        planeMesh.add(pinMesh);
-
-        // Clearance socket ring indicator (amber)
-        const socketRingGeom = new THREE.RingGeometry(
-          pin.radius,
-          pin.radius + pin.tolerance,
-          24
-        );
-        const socketRingMat = new THREE.MeshBasicMaterial({
-          color: 0xf59e0b,
-          side: THREE.DoubleSide,
-        });
-        const ring = new THREE.Mesh(socketRingGeom, socketRingMat);
-        ring.position.set(pin.position[0], pin.position[1], 0.05);
-        planeMesh.add(ring);
-      });
+      cutPlaneVisualRef.current = planeMesh;
     }
-  }, [activeTool, cutConfig, pins, mainGeometry]);
+  }, [activeTool, cutConfig, mainGeometry]);
 
-  // Handle Raycasting for Painting & Adding Connectors
-  const handlePointerDown = useCallback(
+  // Raycasting Handler (Click to Select Tripo Part, or Paint Triangles)
+  const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (!containerRef.current || !cameraRef.current || !sceneRef.current) return;
 
@@ -359,45 +299,93 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
       const raycaster = new THREE.Raycaster();
       raycaster.setFromCamera(new THREE.Vector2(x, y), cameraRef.current);
 
-      // 1. Tool Mode: Paint Triangles / Flood Fill
-      if (activeTool === "paint" && mainGeometry && onSelectTriangles) {
-        const mesh = modelGroupRef.current.getObjectByName("mainModelMesh") as THREE.Mesh;
-        if (!mesh) return;
+      // 1. In Paint Mode: Update 3D Brush cursor ring and continuously paint if pointer is down
+      if (activeTool === "paint" && brushCursorMeshRef.current) {
+        const singleGroup = singleModelGroupRef.current;
+        const mainMesh = singleGroup.getObjectByName("mainModelMesh") as THREE.Mesh;
+        if (mainMesh) {
+          const intersects = raycaster.intersectObject(mainMesh, false);
+          if (intersects.length > 0) {
+            const hit = intersects[0];
+            const cursor = brushCursorMeshRef.current;
+            cursor.visible = true;
+            cursor.position.copy(hit.point).addScaledVector(hit.normal!, 0.3);
+            cursor.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), hit.normal!);
+            cursor.scale.set(brushSizeMm, brushSizeMm, 1);
 
-        const intersects = raycaster.intersectObject(mesh, false);
-        if (intersects.length > 0 && typeof intersects[0].faceIndex === "number") {
-          const hitFaceIndex = intersects[0].faceIndex;
-
-          if (paintMode === "flood") {
-            const connectedFaces = floodFillFaceSelection(
-              mainGeometry,
-              hitFaceIndex,
-              floodAngleDeg
-            );
-            onSelectTriangles(connectedFaces);
-          } else {
-            // Single face or small neighborhood brush
-            onSelectTriangles([hitFaceIndex]);
+            // If mouse button is held down, continuously paint faces
+            if (isPointerDownRef.current && onPaintTriangles && typeof hit.faceIndex === "number") {
+              onPaintTriangles([hit.faceIndex]);
+            }
+            return;
           }
         }
+        brushCursorMeshRef.current.visible = false;
+        return;
       }
 
-      // 2. Tool Mode: Connector Placement by clicking on Cut Plane
-      if (activeTool === "connectors" && cutPlaneMeshRef.current && onAddPinAtPosition) {
-        const intersects = raycaster.intersectObject(cutPlaneMeshRef.current, false);
+      if (brushCursorMeshRef.current) {
+        brushCursorMeshRef.current.visible = false;
+      }
+
+      // 2. In Tripo Parts Mode: Hover detection
+      if (detectedParts.length > 0) {
+        const intersects = raycaster.intersectObjects(partsGroupRef.current.children, false);
         if (intersects.length > 0) {
-          const hitPoint = intersects[0].point;
-          // Transform hitPoint into local coordinate of the plane
-          const localPoint = cutPlaneMeshRef.current.worldToLocal(hitPoint.clone());
-          onAddPinAtPosition([
-            Number(localPoint.x.toFixed(2)),
-            Number(localPoint.y.toFixed(2)),
-          ]);
+          const partId = intersects[0].object.userData.partId;
+          if (partId && partId !== hoveredPartId) {
+            setHoveredPartId(partId);
+          }
+        } else if (hoveredPartId) {
+          setHoveredPartId(null);
         }
       }
     },
-    [activeTool, mainGeometry, paintMode, floodAngleDeg, onSelectTriangles, onAddPinAtPosition]
+    [activeTool, detectedParts, hoveredPartId, brushSizeMm, onPaintTriangles]
   );
+
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      isPointerDownRef.current = true;
+      if (!containerRef.current || !cameraRef.current) return;
+
+      const rect = containerRef.current.getBoundingClientRect();
+      const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(x, y), cameraRef.current);
+
+      // 1. Tripo Part Selection by clicking in 3D
+      if (detectedParts.length > 0 && activeTool !== "paint") {
+        const intersects = raycaster.intersectObjects(partsGroupRef.current.children, false);
+        if (intersects.length > 0) {
+          const partId = intersects[0].object.userData.partId;
+          onSelectPart(partId || null);
+          return;
+        } else {
+          onSelectPart(null);
+        }
+      }
+
+      // 2. Painting single click / smart fill
+      if (activeTool === "paint" && onPaintTriangles) {
+        const singleGroup = singleModelGroupRef.current;
+        const mainMesh = singleGroup.getObjectByName("mainModelMesh") as THREE.Mesh;
+        if (mainMesh) {
+          const intersects = raycaster.intersectObject(mainMesh, false);
+          if (intersects.length > 0 && typeof intersects[0].faceIndex === "number") {
+            onPaintTriangles([intersects[0].faceIndex]);
+          }
+        }
+      }
+    },
+    [detectedParts, activeTool, onSelectPart, onPaintTriangles]
+  );
+
+  const handlePointerUp = () => {
+    isPointerDownRef.current = false;
+  };
 
   // Camera Presets
   const setCameraPreset = (view: "iso" | "top" | "front" | "side") => {
@@ -435,65 +423,34 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
       <div
         ref={containerRef}
         onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
         className="w-full h-full cursor-grab active:cursor-grabbing"
       />
 
-      {/* Floating Camera View Gizmo & Reset buttons */}
-      <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-zinc-900/80 backdrop-blur-md px-2.5 py-1.5 rounded-lg border border-zinc-800 text-xs shadow-lg">
-        <span className="text-zinc-400 font-mono text-[11px] mr-1">Vistas:</span>
-        <button
-          onClick={() => setCameraPreset("iso")}
-          className="px-2 py-0.5 rounded hover:bg-zinc-800 text-zinc-200 transition-colors"
-          title="Vista Isométrica"
-        >
-          ISO
-        </button>
-        <button
-          onClick={() => setCameraPreset("top")}
-          className="px-2 py-0.5 rounded hover:bg-zinc-800 text-zinc-200 transition-colors"
-          title="Vista Superior"
-        >
-          TOP
-        </button>
-        <button
-          onClick={() => setCameraPreset("front")}
-          className="px-2 py-0.5 rounded hover:bg-zinc-800 text-zinc-200 transition-colors"
-          title="Vista Frontal"
-        >
-          FRONT
-        </button>
-        <button
-          onClick={() => setCameraPreset("side")}
-          className="px-2 py-0.5 rounded hover:bg-zinc-800 text-zinc-200 transition-colors"
-          title="Vista Lateral"
-        >
-          SIDE
-        </button>
+      {/* Camera View Controls */}
+      <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-zinc-900/85 backdrop-blur-md px-2.5 py-1.5 rounded-lg border border-zinc-800 text-xs shadow-lg">
+        <span className="text-zinc-500 font-mono text-[10px] mr-1">Vistas:</span>
+        {(["iso", "top", "front", "side"] as const).map((v) => (
+          <button
+            key={v}
+            onClick={() => setCameraPreset(v)}
+            className="px-2 py-0.5 rounded hover:bg-zinc-800 text-zinc-300 font-mono text-[11px] uppercase transition-colors"
+          >
+            {v}
+          </button>
+        ))}
       </div>
 
-      {/* Interaction Mode Overlay Hint */}
-      {activeTool === "paint" && (
-        <div className="absolute top-3 right-3 bg-blue-950/80 border border-blue-800/80 text-blue-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-md flex items-center gap-2 shadow-lg">
-          <div
-            className="w-3 h-3 rounded-full border border-white/50"
-            style={{ backgroundColor: activeColor }}
-          />
-          <span>
-            {paintMode === "flood"
-              ? "Modo Relleno: Haz clic en una cara para pintar la región contigua"
-              : "Modo Pincel: Haz clic para asignar color al triángulo"}
-          </span>
+      {/* Exploded View Floating Indicator (Tripo AI Style) */}
+      {detectedParts.length > 0 && explodedDistance > 0 && (
+        <div className="absolute top-3 right-3 bg-cyan-950/80 border border-cyan-800 text-cyan-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-md shadow-lg flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+          <span>Despiece 3D Activo: {explodedDistance} mm</span>
         </div>
       )}
 
-      {activeTool === "connectors" && (
-        <div className="absolute top-3 right-3 bg-amber-950/80 border border-amber-800/80 text-amber-200 px-3 py-1.5 rounded-lg text-xs backdrop-blur-md shadow-lg flex items-center gap-2">
-          <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-          <span>Haz clic sobre el plano de corte rojo para ubicar un conector</span>
-        </div>
-      )}
-
-      {/* Plate size reference badge */}
+      {/* Build Plate Reference */}
       <div className="absolute bottom-3 left-3 bg-zinc-900/70 backdrop-blur-sm px-2.5 py-1 rounded-md text-[10px] text-zinc-400 font-mono border border-zinc-800/60">
         Cama: 250 × 250 mm | Z-Up
       </div>
