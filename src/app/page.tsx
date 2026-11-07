@@ -23,7 +23,10 @@ import {
   DEFAULT_PALETTE,
 } from "../utils/colorClustering";
 import { cutMeshWithPlane, applyConnectorsToParts } from "../utils/csgCutting";
-import { createMechanicalTestPiece } from "../utils/sampleModels";
+import {
+  createMechanicalTestPiece,
+  createLowPolyCharacter,
+} from "../utils/sampleModels";
 import {
   detectPartsTripoStyle,
   TripoDetectedPart,
@@ -70,38 +73,46 @@ export default function Home() {
   // Loading state
   const [isLoadingFile, setIsLoadingFile] = useState<boolean>(false);
 
-  // Initialize with procedural benchmark piece on mount
+  // Initialize with organic benchmark piece on mount
   useEffect(() => {
-    const sampleGeom = createMechanicalTestPiece();
+    const sampleGeom = createLowPolyCharacter();
     const meshStats = computeMeshStats(sampleGeom);
     setMainGeometry(sampleGeom.clone());
     setOriginalGeometry(sampleGeom.clone());
     setStats(meshStats);
+    setModelName("Mascota_Articulada_LowPoly.stl");
 
-    // Auto-run Tripo detection on initial load for instant wow factor!
+    // Detect parts Tripo style, but start ASSEMBLED (0mm) so the piece is solid and clear!
     const parts = detectPartsTripoStyle(sampleGeom, "balanced");
     setDetectedParts(parts);
-    setExplodedDistance(18); // Show subtle exploded view right away
-  }, []);
-
-  // Handler for loaded/created geometries
-  const handleLoadGeometry = useCallback((geom: THREE.BufferGeometry, name: string) => {
-    setModelName(name);
-    setMainGeometry(geom.clone());
-    setOriginalGeometry(geom.clone());
-    setSplitParts(null);
-    setColorRegions([]);
     setExplodedDistance(0);
-    const newStats = computeMeshStats(geom);
-    setStats(newStats);
-
-    // Run Tripo detection on newly uploaded mesh
-    const parts = detectPartsTripoStyle(geom, "balanced");
-    setDetectedParts(parts);
-    if (parts.length > 1) {
-      setExplodedDistance(15);
-    }
   }, []);
+
+  // Handler for loaded/created geometries (STL, 3MF, OBJ)
+  const handleLoadModel = useCallback(
+    (
+      geom: THREE.BufferGeometry,
+      name: string,
+      preSeparatedParts?: TripoDetectedPart[]
+    ) => {
+      setModelName(name);
+      setMainGeometry(geom.clone());
+      setOriginalGeometry(geom.clone());
+      setSplitParts(null);
+      setColorRegions([]);
+      setExplodedDistance(0);
+      const newStats = computeMeshStats(geom);
+      setStats(newStats);
+
+      if (preSeparatedParts && preSeparatedParts.length > 0) {
+        setDetectedParts(preSeparatedParts);
+      } else {
+        const parts = detectPartsTripoStyle(geom, "balanced");
+        setDetectedParts(parts);
+      }
+    },
+    []
+  );
 
   // Run Tripo AI style segmentation
   const handleRunTripoSegmentation = useCallback(
@@ -454,7 +465,7 @@ export default function Home() {
           onToggleRegionVisibility={handleToggleRegionVisibility}
           onConvertToSubMeshes={handleConvertToSubMeshes}
           isProcessingKMeans={isProcessingKMeans}
-          onLoadGeometry={handleLoadGeometry}
+          onLoadModel={handleLoadModel}
           isLoadingFile={isLoadingFile}
           setIsLoadingFile={setIsLoadingFile}
         />

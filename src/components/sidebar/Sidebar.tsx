@@ -55,7 +55,11 @@ interface SidebarProps {
   onToggleRegionVisibility: (regId: string) => void;
   onConvertToSubMeshes: () => void;
   isProcessingKMeans: boolean;
-  onLoadGeometry: (geom: THREE.BufferGeometry, name: string) => void;
+  onLoadModel: (
+    geom: THREE.BufferGeometry,
+    name: string,
+    preSeparatedParts?: TripoDetectedPart[]
+  ) => void;
   isLoadingFile: boolean;
   setIsLoadingFile: (val: boolean) => void;
 }
@@ -81,7 +85,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               ? "bg-zinc-800 text-zinc-100 shadow-sm"
               : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
           }`}
-          title="Importar modelo STL"
+          title="Importar modelo STL, 3MF u OBJ"
         >
           <FolderOpen className="w-3.5 h-3.5" />
           <span>Modelo</span>
@@ -144,7 +148,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       <div className="flex-1 overflow-y-auto p-4">
         {activeTab === "import" && (
           <ImportTab
-            onLoadGeometry={props.onLoadGeometry}
+            onLoadModel={props.onLoadModel}
             isLoading={props.isLoadingFile}
             setIsLoading={props.setIsLoadingFile}
           />
