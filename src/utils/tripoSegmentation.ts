@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { MeshStats } from "../types";
 import { computeMeshStats } from "./meshStats";
+import { sealAndCapMesh } from "./meshCapping";
 
 export interface TripoDetectedPart {
   id: string;
@@ -299,14 +300,17 @@ export function detectPartsTripoStyle(
 
     partCenter.divideScalar(vertexCount);
 
-    const partGeom = new THREE.BufferGeometry();
-    partGeom.setAttribute("position", new THREE.BufferAttribute(partPositions, 3));
+    const rawGeom = new THREE.BufferGeometry();
+    rawGeom.setAttribute("position", new THREE.BufferAttribute(partPositions, 3));
     if (partNormals) {
-      partGeom.setAttribute("normal", new THREE.BufferAttribute(partNormals, 3));
+      rawGeom.setAttribute("normal", new THREE.BufferAttribute(partNormals, 3));
     } else {
-      partGeom.computeVertexNormals();
+      rawGeom.computeVertexNormals();
     }
-    partGeom.computeBoundingBox();
+    rawGeom.computeBoundingBox();
+
+    // SEAL & CAP: Turn open surface patch into a 100% solid, closed watertight 3D printable manifold!
+    const partGeom = sealAndCapMesh(rawGeom);
 
     // Compute semantic label like Tripo AI
     const relZ = (partCenter.z - zMin) / zSpan;

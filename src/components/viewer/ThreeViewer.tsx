@@ -10,6 +10,7 @@ import { CutPlaneConfig, ActiveTool } from "../../types";
 interface ThreeViewerProps {
   mainGeometry: THREE.BufferGeometry | null;
   detectedParts: TripoDetectedPart[];
+  splitParts: { id: string; name: string; color: string; geometry: THREE.BufferGeometry; visible: boolean }[] | null;
   selectedPartId: string | null;
   onSelectPart: (id: string | null) => void;
   explodedDistance: number;
@@ -26,6 +27,7 @@ interface ThreeViewerProps {
 export const ThreeViewer: React.FC<ThreeViewerProps> = ({
   mainGeometry,
   detectedParts,
+  splitParts,
   selectedPartId,
   onSelectPart,
   explodedDistance,
@@ -178,25 +180,58 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
       singleGroup.remove(singleGroup.children[0]);
     }
 
-    // 1. If Tripo AI parts are detected: Render individual modular parts with exploded offsets!
-    if (detectedParts.length > 0) {
-      detectedParts.forEach((part) => {
+    // 1. If CSG Cut Parts are active: Render split parts with male pins and sockets!
+    if (splitParts && splitParts.length > 0) {
+      splitParts.forEach((part, index) => {
         if (!part.visible) return;
-
-        const isSelected = part.id === selectedPartId;
-        const isHovered = part.id === hoveredPartId;
 
         const mat = new THREE.MeshStandardMaterial({
           color: new THREE.Color(part.color),
           roughness: 0.35,
           metalness: 0.1,
           wireframe: wireframe,
+        });
+
+        const mesh = new THREE.Mesh(part.geometry, mat);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.userData = { partId: part.id };
+
+        if (explodedDistance > 0) {
+          const dir = index === 0 ? 1 : -1;
+          let offsetVec = new THREE.Vector3(0, 0, dir * explodedDistance);
+          if (cutConfig.axis === "x") offsetVec.set(dir * explodedDistance, 0, 0);
+          if (cutConfig.axis === "y") offsetVec.set(0, dir * explodedDistance, 0);
+          mesh.position.copy(offsetVec);
+        }
+
+        partsGroup.add(mesh);
+      });
+      return;
+    }
+
+    // 2. If Tripo AI parts are detected: Render individual modular parts with exploded offsets!
+    if (detectedParts.length > 0) {
+      detectedParts.forEach((part) => {
+        if (!part.visible) return;
+
+        const isSelected = part.id === selectedPartId;
+        const isHovered = part.id === hoveredPartId;
+        const isDowel = part.id.startsWith("dowel");
+
+        const mat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(part.color),
+          roughness: isDowel ? 0.2 : 0.35,
+          metalness: isDowel ? 0.3 : 0.1,
+          wireframe: wireframe,
           emissive: isSelected
             ? new THREE.Color(0x38bdf8)
             : isHovered
             ? new THREE.Color(0x27272a)
+            : isDowel
+            ? new THREE.Color(0x422006) // subtle warm glow for dowels
             : new THREE.Color(0x000000),
-          emissiveIntensity: isSelected ? 0.45 : isHovered ? 0.25 : 0.0,
+          emissiveIntensity: isSelected ? 0.45 : isHovered ? 0.25 : 0.3,
         });
 
         const mesh = new THREE.Mesh(part.geometry, mat);
@@ -205,7 +240,7 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
         mesh.userData = { partId: part.id };
 
         // Apply Tripo-style radial exploded view translation
-        if (explodedDistance > 0) {
+        if (explodedDistance > 0 && !isDowel) {
           const offsetVec = part.explosionVector.clone().multiplyScalar(explodedDistance);
           mesh.position.copy(offsetVec);
         }

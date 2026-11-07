@@ -162,40 +162,53 @@ export default function Home() {
     if (detectedParts.length < 2) return;
 
     try {
-      // Pick the first two prominent adjacent parts
-      const partA = detectedParts[0];
-      const partB = detectedParts[1];
+      // Find pairs of parts that are vertically stacked / adjacent
+      // Sort parts by Z centroid
+      const sorted = [...detectedParts].sort((a, b) => a.center.z - b.center.z);
 
-      const res = generateDowelBetweenParts(partA, partB, 4.0, 10.0, 0.2);
+      let currentParts = [...detectedParts];
+      const newDowels: TripoDetectedPart[] = [];
 
-      const dowelStats = computeMeshStats(res.dowelGeometry);
-      const dowelPart: TripoDetectedPart = {
-        id: `dowel-${Date.now()}`,
-        name: "Pasador de Ensamble (Dowel 3D)",
-        color: "#ffffff",
-        geometry: res.dowelGeometry,
-        stats: dowelStats,
-        center: res.dowelPosition,
-        explosionVector: new THREE.Vector3(0, 0, 1),
-        visible: true,
-        selected: false,
-        contactNeighborIds: [partA.id, partB.id],
-      };
+      // Create a dowel connector between each adjacent vertical pair
+      for (let i = 0; i < sorted.length - 1; i++) {
+        const partLower = sorted[i];
+        const partUpper = sorted[i + 1];
 
-      setDetectedParts((prev) => [
-        ...prev.map((p) => {
-          if (p.id === partA.id) return { ...p, geometry: res.updatedPartA };
-          if (p.id === partB.id) return { ...p, geometry: res.updatedPartB };
+        const res = generateDowelBetweenParts(partLower, partUpper, 4.0, 10.0, 0.2);
+
+        const dowelStats = computeMeshStats(res.dowelGeometry);
+        const dowelPart: TripoDetectedPart = {
+          id: `dowel-joint-${i + 1}`,
+          name: `Pasador Dowel ${i + 1} (Ø4×10mm)`,
+          color: "#fef08a", // Bright yellow/gold for high visibility!
+          geometry: res.dowelGeometry,
+          stats: dowelStats,
+          center: res.dowelPosition,
+          explosionVector: new THREE.Vector3(0, 0, 0), // Dowel stays in the center of the joint!
+          visible: true,
+          selected: false,
+          contactNeighborIds: [partLower.id, partUpper.id],
+        };
+
+        newDowels.push(dowelPart);
+
+        // Update parts with their recessed sockets
+        currentParts = currentParts.map((p) => {
+          if (p.id === partLower.id) return { ...p, geometry: res.updatedPartA };
+          if (p.id === partUpper.id) return { ...p, geometry: res.updatedPartB };
           return p;
-        }),
-        dowelPart,
-      ]);
+        });
+      }
+
+      setDetectedParts([...currentParts, ...newDowels]);
+      // Set exploded distance so user sees the pins floating right between the parts!
+      setExplodedDistance(25);
     } catch (err) {
       console.error("Connector generation failed:", err);
     }
   }, [detectedParts]);
 
-  // Execute CSG boolean cut
+  // Execute CSG boolean cut with pin and socket generation
   const handleExecuteCut = useCallback(() => {
     const targetGeom = originalGeometry || mainGeometry;
     if (!targetGeom) return;
@@ -212,28 +225,34 @@ export default function Home() {
           visualize: true,
         });
 
-        const partAStats = computeMeshStats(cutResult.partA);
-        const partBStats = computeMeshStats(cutResult.partB);
+        // Apply connector pins (male pins on Part A and tolerance sockets on Part B)
+        const finalParts = pins.length > 0
+          ? applyConnectorsToParts(cutResult.partA, cutResult.partB, cutResult, pins)
+          : { partA: cutResult.partA, partB: cutResult.partB };
+
+        const partAStats = computeMeshStats(finalParts.partA);
+        const partBStats = computeMeshStats(finalParts.partB);
 
         setSplitParts([
           {
             id: "part-top-male",
-            name: "Parte_Superior_Corte",
+            name: pins.length > 0 ? "Parte_Superior_PinesMacho" : "Parte_Superior_Corte",
             color: "#06b6d4",
-            geometry: cutResult.partA,
+            geometry: finalParts.partA,
             stats: partAStats,
             visible: true,
           },
           {
             id: "part-bottom-female",
-            name: "Parte_Inferior_Corte",
+            name: pins.length > 0 ? "Parte_Inferior_CajasHembra" : "Parte_Inferior_Corte",
             color: "#f59e0b",
-            geometry: cutResult.partB,
+            geometry: finalParts.partB,
             stats: partBStats,
             visible: true,
           },
         ]);
 
+        // Separate parts automatically so user sees the cut and the pins!
         setExplodedDistance(25);
       } catch (err) {
         console.error("CSG cut failed:", err);
@@ -241,7 +260,7 @@ export default function Home() {
         setIsProcessingCSG(false);
       }
     }, 50);
-  }, [originalGeometry, mainGeometry, cutConfig]);
+  }, [originalGeometry, mainGeometry, cutConfig, pins]);
 
   const handleResetCut = () => {
     setSplitParts(null);
@@ -409,6 +428,7 @@ export default function Home() {
             <ThreeViewer
               mainGeometry={mainGeometry}
               detectedParts={detectedParts}
+              splitParts={splitParts}
               selectedPartId={selectedPartId}
               onSelectPart={setSelectedPartId}
               explodedDistance={explodedDistance}

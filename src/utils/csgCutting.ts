@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { Evaluator, Brush, SUBTRACTION, INTERSECTION, ADDITION } from "three-bvh-csg";
 import { CutPlaneConfig, ConnectorPin } from "../types";
+import { sealAndCapMesh } from "./meshCapping";
 
 export interface CutResult {
   partA: THREE.BufferGeometry; // Above / positive side
@@ -90,15 +91,19 @@ export function cutMeshWithPlane(
   // Part B (Negative half): Subtract the positive box
   const resultPartB = evaluator.evaluate(sourceBrush, posBrush, SUBTRACTION);
 
-  resultPartA.geometry.computeVertexNormals();
-  resultPartA.geometry.computeBoundingBox();
+  // Ensure both cut halves are 100% solid, sealed, watertight manifolds!
+  const solidPartA = sealAndCapMesh(resultPartA.geometry);
+  const solidPartB = sealAndCapMesh(resultPartB.geometry);
 
-  resultPartB.geometry.computeVertexNormals();
-  resultPartB.geometry.computeBoundingBox();
+  solidPartA.computeVertexNormals();
+  solidPartA.computeBoundingBox();
+
+  solidPartB.computeVertexNormals();
+  solidPartB.computeBoundingBox();
 
   return {
-    partA: resultPartA.geometry,
-    partB: resultPartB.geometry,
+    partA: solidPartA,
+    partB: solidPartB,
     planePoint,
     planeNormal,
   };
