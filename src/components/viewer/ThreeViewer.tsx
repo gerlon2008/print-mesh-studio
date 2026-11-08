@@ -51,8 +51,10 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
   const singleModelGroupRef = useRef<THREE.Group>(new THREE.Group());
   const brushCursorMeshRef = useRef<THREE.Mesh | null>(null);
   const cutPlaneVisualRef = useRef<THREE.Mesh | null>(null);
+  const buildPlateGroupRef = useRef<THREE.Group | null>(null);
 
   // Interaction State
+  const [showPlate, setShowPlate] = useState<boolean>(false); // Default OFF as requested by user
   const [hoveredPartId, setHoveredPartId] = useState<string | null>(null);
   const isPointerDownRef = useRef(false);
 
@@ -119,9 +121,11 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
     rimLight.position.set(-160, 160, 100);
     scene.add(rimLight);
 
-    // Build Plate
+    // Build Plate (floor grid, optional)
     const buildPlate = createBuildPlate(250);
+    buildPlate.visible = false; // Default OFF
     scene.add(buildPlate);
+    buildPlateGroupRef.current = buildPlate;
 
     // Add containers
     scene.add(partsGroupRef.current);
@@ -166,6 +170,41 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
       container.innerHTML = "";
     };
   }, []);
+
+  // Sync Floor Grid Visibility
+  useEffect(() => {
+    if (buildPlateGroupRef.current) {
+      buildPlateGroupRef.current.visible = showPlate;
+    }
+  }, [showPlate]);
+
+  // Auto-Frame camera on loaded model and position floor at true base
+  useEffect(() => {
+    if (!mainGeometry) return;
+    if (!mainGeometry.boundingBox) mainGeometry.computeBoundingBox();
+    const bbox = mainGeometry.boundingBox || new THREE.Box3();
+    const center = new THREE.Vector3();
+    bbox.getCenter(center);
+    const size = new THREE.Vector3();
+    bbox.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z, 40);
+
+    if (controlsRef.current && cameraRef.current) {
+      controlsRef.current.target.copy(center);
+      cameraRef.current.position.set(
+        center.x + maxDim * 1.4,
+        center.y - maxDim * 1.4,
+        center.z + maxDim * 1.1
+      );
+      cameraRef.current.lookAt(center);
+      controlsRef.current.update();
+    }
+
+    if (buildPlateGroupRef.current) {
+      // Place grid strictly at the true bottom of the model
+      buildPlateGroupRef.current.position.set(center.x, center.y, bbox.min.z);
+    }
+  }, [mainGeometry]);
 
   // Update Rendered Meshes (Tripo Parts vs Single Model)
   useEffect(() => {
@@ -475,6 +514,18 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
             {v}
           </button>
         ))}
+        <span className="text-zinc-700 mx-1">|</span>
+        <button
+          onClick={() => setShowPlate((prev) => !prev)}
+          className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
+            showPlate
+              ? "bg-cyan-950 text-cyan-300 border border-cyan-800"
+              : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+          }`}
+          title="Alternar visibilidad de la cuadrícula de suelo"
+        >
+          {showPlate ? "Plancha: ON" : "Plancha: OFF"}
+        </button>
       </div>
 
       {/* Exploded View Floating Indicator (Tripo AI Style) */}
@@ -485,10 +536,12 @@ export const ThreeViewer: React.FC<ThreeViewerProps> = ({
         </div>
       )}
 
-      {/* Build Plate Reference */}
-      <div className="absolute bottom-3 left-3 bg-zinc-900/70 backdrop-blur-sm px-2.5 py-1 rounded-md text-[10px] text-zinc-400 font-mono border border-zinc-800/60">
-        Cama: 250 × 250 mm | Z-Up
-      </div>
+      {/* Floor Grid reference (only when enabled) */}
+      {showPlate && (
+        <div className="absolute bottom-3 left-3 bg-zinc-900/70 backdrop-blur-sm px-2.5 py-1 rounded-md text-[10px] text-zinc-400 font-mono border border-zinc-800/60">
+          Cuadrícula Base: 250 × 250 mm
+        </div>
+      )}
     </div>
   );
 };
