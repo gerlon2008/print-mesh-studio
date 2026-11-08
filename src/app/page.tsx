@@ -31,6 +31,7 @@ import {
   detectPartsTripoStyle,
   TripoDetectedPart,
   SegmentationTier,
+  SegmentationMode,
 } from "../utils/tripoSegmentation";
 import { generateDowelBetweenParts } from "../utils/jointConnectorGenerator";
 
@@ -114,20 +115,20 @@ export default function Home() {
     []
   );
 
-  // Run Tripo AI style segmentation
+  // Run natural part detection (Bambu Studio "Split to Parts" + Tripo AI)
   const handleRunTripoSegmentation = useCallback(
-    (tier: SegmentationTier) => {
+    (tier: SegmentationTier, mode: SegmentationMode = "islands") => {
       const targetGeom = originalGeometry || mainGeometry;
       if (!targetGeom) return;
 
       setIsProcessingTripo(true);
       setTimeout(() => {
         try {
-          const parts = detectPartsTripoStyle(targetGeom, tier);
+          const parts = detectPartsTripoStyle(targetGeom, tier, mode);
           setDetectedParts(parts);
-          setExplodedDistance(20); // Automatically trigger exploded view
+          setExplodedDistance(0); // Keep model assembled so parts stay in place!
         } catch (err) {
-          console.error("Tripo segmentation failed:", err);
+          console.error("Part detection failed:", err);
         } finally {
           setIsProcessingTripo(false);
         }

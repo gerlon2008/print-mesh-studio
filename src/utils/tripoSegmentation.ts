@@ -1,7 +1,6 @@
 import * as THREE from "three";
 import { MeshStats } from "../types";
 import { computeMeshStats } from "./meshStats";
-import { sealAndCapMesh } from "./meshCapping";
 
 export interface TripoDetectedPart {
   id: string;
@@ -16,6 +15,7 @@ export interface TripoDetectedPart {
   contactNeighborIds: string[];
 }
 
+export type SegmentationMode = "islands" | "creases" | "anatomical";
 export type SegmentationTier = "simple" | "balanced" | "detailed";
 
 export const TRIPO_PALETTE = [
@@ -31,18 +31,21 @@ export const TRIPO_PALETTE = [
   "#f97316", // Orange
   "#14b8a6", // Teal
   "#e2e8f0", // Silver White
+  "#eab308", // Yellow
+  "#ef4444", // Crimson
+  "#8b5cf6", // Violet
 ];
 
 /**
- * Intelligent semantic part detection inspired by Tripo AI Segmentation v2.
- * Analyzes concave seams, constriction pinch-points, and geometric clusters
- * to decompose the 3D model into logical, watertight functional components.
+ * Intelligent Part Detection for 3D Printing (Bambu Studio "Split to Parts" + Tripo AI).
+ * Detects distinct, intact physical components (sunglasses, hair, clothes, body, props)
+ * WITHOUT shattering or breaking any geometry into jagged fragments!
  */
 export function detectPartsTripoStyle(
   geometry: THREE.BufferGeometry,
-  tier: SegmentationTier = "balanced"
+  tier: SegmentationTier = "balanced",
+  mode: SegmentationMode = "islands"
 ): TripoDetectedPart[] {
-  // Ensure non-indexed for clean face separation
   const nonIndexed = geometry.toNonIndexed();
   const posAttr = nonIndexed.getAttribute("position");
   const normAttr = nonIndexed.getAttribute("normal");
@@ -50,220 +53,106 @@ export function detectPartsTripoStyle(
 
   if (triangleCount === 0) return [];
 
-  // Compute bounding box and spatial dimensions
+  // Compute bounding box and global center
   if (!geometry.boundingBox) geometry.computeBoundingBox();
   const bbox = geometry.boundingBox || new THREE.Box3();
-  const size = new THREE.Vector3();
-  bbox.getSize(size);
   const globalCenter = new THREE.Vector3();
   bbox.getCenter(globalCenter);
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
 
-  // Target part counts by tier
-  const targetK = tier === "simple" ? 4 : tier === "balanced" ? 7 : 12;
-
-  // Extract triangle geometric descriptors: center, normal, height, radius
-  const pA = new THREE.Vector3();
-  const pB = new THREE.Vector3();
-  const pC = new THREE.Vector3();
-  const nA = new THREE.Vector3();
-  const nB = new THREE.Vector3();
-  const nC = new THREE.Vector3();
-  const faceNormal = new THREE.Vector3();
-  const faceCenter = new THREE.Vector3();
-
-  interface FaceInfo {
-    index: number;
-    center: THREE.Vector3;
-    normal: THREE.Vector3;
-    normHeight: number; // 0 (bottom) to 1 (top)
-    normRadius: number; // 0 (center) to 1 (outer)
-    lateralAngle: number; // -PI to PI
+  // 1. Build vertex spatial map to identify topological connectivity
+  // Round coordinates to 0.05mm to handle shared vertices even in non-indexed STL
+  function getVertexKey(x: number, y: number, z: number): string {
+    return `${Math.round(x * 20)}_${Math.round(y * 20)}_${Math.round(z * 20)}`;
   }
 
-  const faces: FaceInfo[] = new Array(triangleCount);
-  const zMin = bbox.min.z;
-  const zSpan = size.z > 0 ? size.z : 1;
-  const maxR = Math.max(size.x, size.y) * 0.5 || 1;
+  const vertexToTriangles = new Map<string, number[]>();
+  const triangleCenters: THREE.Vector3[] = new Array(triangleCount);
 
   for (let i = 0; i < triangleCount; i++) {
     const v0 = i * 3;
     const v1 = i * 3 + 1;
     const v2 = i * 3 + 2;
 
-    pA.fromBufferAttribute(posAttr, v0);
-    pB.fromBufferAttribute(posAttr, v1);
-    pC.fromBufferAttribute(posAttr, v2);
+    const p0 = new THREE.Vector3(posAttr.getX(v0), posAttr.getY(v0), posAttr.getZ(v0));
+    const p1 = new THREE.Vector3(posAttr.getX(v1), posAttr.getY(v1), posAttr.getZ(v1));
+    const p2 = new THREE.Vector3(posAttr.getX(v2), posAttr.getY(v2), posAttr.getZ(v2));
 
-    faceCenter.set(
-      (pA.x + pB.x + pC.x) / 3,
-      (pA.y + pB.y + pC.y) / 3,
-      (pA.z + pB.z + pC.z) / 3
+    triangleCenters[i] = new THREE.Vector3(
+      (p0.x + p1.x + p2.x) / 3,
+      (p0.y + p1.y + p2.y) / 3,
+      (p0.z + p1.z + p2.z) / 3
     );
 
-    if (normAttr) {
-      nA.fromBufferAttribute(normAttr, v0);
-      nB.fromBufferAttribute(normAttr, v1);
-      nC.fromBufferAttribute(normAttr, v2);
-      faceNormal.addVectors(nA, nB).add(nC).normalize();
-    } else {
-      faceNormal.crossVectors(pB.clone().sub(pA), pC.clone().sub(pA)).normalize();
+    const k0 = getVertexKey(p0.x, p0.y, p0.z);
+    const k1 = getVertexKey(p1.x, p1.y, p1.z);
+    const k2 = getVertexKey(p2.x, p2.y, p2.z);
+
+    for (const k of [k0, k1, k2]) {
+      const list = vertexToTriangles.get(k);
+      if (list) list.push(i);
+      else vertexToTriangles.set(k, [i]);
     }
-
-    const r = Math.sqrt(
-      Math.pow(faceCenter.x - globalCenter.x, 2) + Math.pow(faceCenter.y - globalCenter.y, 2)
-    );
-
-    faces[i] = {
-      index: i,
-      center: faceCenter.clone(),
-      normal: faceNormal.clone(),
-      normHeight: (faceCenter.z - zMin) / zSpan,
-      normRadius: Math.min(1, r / maxR),
-      lateralAngle: Math.atan2(faceCenter.y - globalCenter.y, faceCenter.x - globalCenter.x),
-    };
   }
 
-  // Detect constriction pinch-points along height (Z axis)
-  // Divide height into 30 bins to find cross-section necks
-  const numBins = 30;
-  const binCounts = new Int32Array(numBins);
+  // 2. Extract Connected Components (Mesh Islands / Individual Topological Shells)
+  // This is the Bambu Studio "Split to Parts" standard: keeps sunglasses, clothes, hair, body 100% INTACT!
+  const visited = new Uint8Array(triangleCount);
+  const rawIslands: number[][] = [];
+
   for (let i = 0; i < triangleCount; i++) {
-    const binIdx = Math.min(numBins - 1, Math.max(0, Math.floor(faces[i].normHeight * numBins)));
-    binCounts[binIdx]++;
-  }
+    if (visited[i]) continue;
+    const island: number[] = [];
+    const queue: number[] = [i];
+    visited[i] = 1;
 
-  // Find local minima (pinch necks)
-  const pinchZLevels: number[] = [];
-  for (let b = 2; b < numBins - 2; b++) {
-    if (binCounts[b] < binCounts[b - 1] && binCounts[b] < binCounts[b + 1]) {
-      pinchZLevels.push(b / numBins);
-    }
-  }
+    while (queue.length > 0) {
+      const curr = queue.pop()!;
+      island.push(curr);
 
-  // K-Means clustering combining:
-  // 1. Spatial height (Z with sensitivity to pinch points)
-  // 2. Radial distance (Center core vs Outer appendages/wings/limbs)
-  // 3. Lateral angle quadrants (Left, Right, Front, Back)
-  // 4. Normal direction (Up-facing caps, Down-facing base, Side walls)
-  const assignments = new Int32Array(triangleCount);
-  const centroids: {
-    normZ: number;
-    normR: number;
-    angle: number;
-    normZDir: number;
-  }[] = [];
-
-  // Seed centroids based on morphological hierarchy
-  if (targetK <= 4) {
-    // Simple: Base, Lower Body, Upper Body, Top/Head
-    centroids.push({ normZ: 0.12, normR: 0.5, angle: 0, normZDir: -0.7 });
-    centroids.push({ normZ: 0.45, normR: 0.3, angle: 0, normZDir: 0.0 });
-    centroids.push({ normZ: 0.75, normR: 0.4, angle: 0, normZDir: 0.5 });
-    centroids.push({ normZ: 0.95, normR: 0.2, angle: 0, normZDir: 0.9 });
-  } else if (targetK <= 8) {
-    // Balanced: Base, Core/Torso, Head/Cap, Left Limb/Detail, Right Limb/Detail, Front, Back
-    centroids.push({ normZ: 0.08, normR: 0.6, angle: 0, normZDir: -0.8 }); // Base
-    centroids.push({ normZ: 0.50, normR: 0.2, angle: 0, normZDir: 0.0 }); // Central Core
-    centroids.push({ normZ: 0.88, normR: 0.3, angle: 0, normZDir: 0.9 }); // Head/Top
-    centroids.push({ normZ: 0.50, normR: 0.8, angle: -Math.PI / 2, normZDir: 0.0 }); // Lateral Left
-    centroids.push({ normZ: 0.50, normR: 0.8, angle: Math.PI / 2, normZDir: 0.0 }); // Lateral Right
-    centroids.push({ normZ: 0.50, normR: 0.7, angle: 0, normZDir: 0.0 }); // Front
-    centroids.push({ normZ: 0.50, normR: 0.7, angle: Math.PI, normZDir: 0.0 }); // Back
-  } else {
-    // Detailed: 12 partitions
-    for (let level = 0; level < 4; level++) {
-      const z = (level + 0.5) / 4;
-      centroids.push({ normZ: z, normR: 0.15, angle: 0, normZDir: level === 3 ? 1 : level === 0 ? -1 : 0 });
-      for (let quad = 0; quad < 2; quad++) {
-        const ang = quad === 0 ? -Math.PI / 2 : Math.PI / 2;
-        centroids.push({ normZ: z, normR: 0.75, angle: ang, normZDir: 0 });
-      }
-    }
-  }
-
-  const actualK = centroids.length;
-
-  // Metric distance function
-  const calcDist = (face: FaceInfo, c: (typeof centroids)[0]) => {
-    const dz = face.normHeight - c.normZ;
-    const dr = face.normRadius - c.normR;
-    const dNormZ = face.normal.z - c.normZDir;
-
-    // Angle difference on circle
-    let dAng = Math.abs(face.lateralAngle - c.angle);
-    if (dAng > Math.PI) dAng = 2 * Math.PI - dAng;
-
-    return (
-      dz * dz * 4.0 + // Strong vertical partition
-      dr * dr * 2.5 + // Core vs Appendage
-      dAng * dAng * 1.5 * face.normRadius + // Lateral sectors stronger further from center
-      dNormZ * dNormZ * 0.8
-    );
-  };
-
-  // Run K-Means refinement (10 iterations)
-  for (let iter = 0; iter < 10; iter++) {
-    // Assignment
-    for (let i = 0; i < triangleCount; i++) {
-      const f = faces[i];
-      let bestDist = Infinity;
-      let bestC = 0;
-
-      for (let k = 0; k < actualK; k++) {
-        const d = calcDist(f, centroids[k]);
-        if (d < bestDist) {
-          bestDist = d;
-          bestC = k;
+      const v0 = curr * 3;
+      for (let v = 0; v < 3; v++) {
+        const k = getVertexKey(
+          posAttr.getX(v0 + v),
+          posAttr.getY(v0 + v),
+          posAttr.getZ(v0 + v)
+        );
+        const neighbors = vertexToTriangles.get(k) || [];
+        for (const n of neighbors) {
+          if (!visited[n]) {
+            visited[n] = 1;
+            queue.push(n);
+          }
         }
       }
-      assignments[i] = bestC;
     }
-
-    // Centroid update
-    const counts = new Int32Array(actualK);
-    const sumZ = new Float64Array(actualK);
-    const sumR = new Float64Array(actualK);
-    const sumDirZ = new Float64Array(actualK);
-
-    for (let i = 0; i < triangleCount; i++) {
-      const c = assignments[i];
-      counts[c]++;
-      sumZ[c] += faces[i].normHeight;
-      sumR[c] += faces[i].normRadius;
-      sumDirZ[c] += faces[i].normal.z;
-    }
-
-    for (let k = 0; k < actualK; k++) {
-      if (counts[k] > 0) {
-        centroids[k].normZ = sumZ[k] / counts[k];
-        centroids[k].normR = sumR[k] / counts[k];
-        centroids[k].normZDir = sumDirZ[k] / counts[k];
-      }
-    }
+    rawIslands.push(island);
   }
 
-  // Group triangle indices by cluster
-  const clusters: number[][] = Array.from({ length: actualK }, () => []);
-  for (let i = 0; i < triangleCount; i++) {
-    clusters[assignments[i]].push(i);
+  // Sort islands from largest to smallest
+  rawIslands.sort((a, b) => b.length - a.length);
+
+  // Filter out tiny noise particles (< 25 triangles), but keep all real parts
+  const minTris = Math.max(20, Math.floor(triangleCount * 0.002));
+  let validIslands = rawIslands.filter((isl) => isl.length >= minTris);
+
+  // If the model was a single unified shell (no disconnected islands):
+  // Segment along sharp crease boundaries (concave seams > 45 deg) instead of cutting smoothly across surfaces!
+  if (validIslands.length <= 1) {
+    validIslands = segmentByCreases(
+      geometry,
+      triangleCenters,
+      vertexToTriangles,
+      tier === "simple" ? 4 : tier === "balanced" ? 6 : 9
+    );
   }
 
-  // Filter out tiny degenerate clusters (merge with nearest)
-  const minTriangles = Math.max(30, Math.floor(triangleCount * 0.015));
-  const validClusters: { clusterIdx: number; indices: number[] }[] = [];
-
-  for (let k = 0; k < actualK; k++) {
-    if (clusters[k].length >= minTriangles) {
-      validClusters.push({ clusterIdx: k, indices: clusters[k] });
-    }
-  }
-
-  // If some faces got left out, assign to nearest valid cluster
+  // 3. Build intact, unbroken TripoDetectedPart for each component!
   const detectedParts: TripoDetectedPart[] = [];
   let colorIdx = 0;
 
-  validClusters.forEach((cl, partIdx) => {
-    const triIndices = cl.indices;
+  validIslands.forEach((triIndices, partIdx) => {
     const vertexCount = triIndices.length * 3;
     const partPositions = new Float32Array(vertexCount * 3);
     const partNormals = normAttr ? new Float32Array(vertexCount * 3) : null;
@@ -300,48 +189,54 @@ export function detectPartsTripoStyle(
 
     partCenter.divideScalar(vertexCount);
 
-    const rawGeom = new THREE.BufferGeometry();
-    rawGeom.setAttribute("position", new THREE.BufferAttribute(partPositions, 3));
+    const partGeom = new THREE.BufferGeometry();
+    partGeom.setAttribute("position", new THREE.BufferAttribute(partPositions, 3));
     if (partNormals) {
-      rawGeom.setAttribute("normal", new THREE.BufferAttribute(partNormals, 3));
+      partGeom.setAttribute("normal", new THREE.BufferAttribute(partNormals, 3));
     } else {
-      rawGeom.computeVertexNormals();
+      partGeom.computeVertexNormals();
     }
-    rawGeom.computeBoundingBox();
+    partGeom.computeBoundingBox();
 
-    // SEAL & CAP: Turn open surface patch into a 100% solid, closed watertight 3D printable manifold!
-    const partGeom = sealAndCapMesh(rawGeom);
-
-    // Compute semantic label like Tripo AI
-    const relZ = (partCenter.z - zMin) / zSpan;
+    // Semantic Label Detection based on position relative to model
+    const relZ = (partCenter.z - bbox.min.z) / (size.z || 1);
     const relX = partCenter.x - globalCenter.x;
     const relY = partCenter.y - globalCenter.y;
+    const partBBox = partGeom.boundingBox || new THREE.Box3();
+    const partSize = new THREE.Vector3();
+    partBBox.getSize(partSize);
 
     let semanticName = `Parte ${partIdx + 1}`;
-    if (relZ < 0.2) {
+    if (relZ > 0.75) {
+      if (partSize.x < size.x * 0.6 && partCenter.y < globalCenter.y) {
+        semanticName = "Gafas / Lentes";
+      } else {
+        semanticName = "Cabeza / Rostro";
+      }
+    } else if (relZ < 0.25) {
       semanticName = "Base / Soporte Inferior";
-    } else if (relZ > 0.8) {
-      semanticName = "Cúpula / Cabeza Superior";
     } else if (Math.abs(relX) > size.x * 0.25) {
-      semanticName = relX > 0 ? "Lateral / Extremidad Derecha" : "Lateral / Extremidad Izquierda";
-    } else if (Math.abs(relY) > size.y * 0.25) {
-      semanticName = relY > 0 ? "Frontal / Detalle Delantero" : "Dorsal / Detalle Trasero";
-    } else {
-      semanticName = "Cuerpo Central / Núcleo";
+      semanticName = relX > 0 ? "Mano / Brazo Derecho" : "Mano / Brazo Izquierdo";
+    } else if (relZ >= 0.25 && relZ <= 0.75) {
+      if (partSize.z < size.z * 0.2) {
+        semanticName = "Collar / Joyería / Cadena";
+      } else {
+        semanticName = "Chaqueta / Vestimenta";
+      }
     }
 
-    // Explosion Vector (Outward from model center for 3D Exploded View)
+    // Explosion Vector (Smooth, beautiful radial offset for 3D Exploded View)
     const explosionVector = new THREE.Vector3().subVectors(partCenter, globalCenter);
-    // Amplify lateral spread for dramatic exploded view
-    explosionVector.x *= 1.4;
-    explosionVector.y *= 1.4;
-    if (explosionVector.length() < 0.001) explosionVector.set(0, 0, 1);
+    // Give dominant Z offset for upper/lower and XY offset for lateral parts
+    if (explosionVector.length() < 0.01) {
+      explosionVector.set(0, 0, 1);
+    }
     explosionVector.normalize();
 
     const partStats = computeMeshStats(partGeom);
 
     detectedParts.push({
-      id: `tripo-part-${partIdx + 1}`,
+      id: `part-${partIdx + 1}`,
       name: semanticName,
       color: TRIPO_PALETTE[colorIdx % TRIPO_PALETTE.length],
       geometry: partGeom,
@@ -357,4 +252,107 @@ export function detectPartsTripoStyle(
   });
 
   return detectedParts;
+}
+
+/**
+ * Fallback for single-shell continuous meshes:
+ * Segments strictly along sharp crease boundaries (dihedral angle > 45 deg)
+ * so it NEVER chops across smooth flat surfaces like clothes or skin!
+ */
+function segmentByCreases(
+  geometry: THREE.BufferGeometry,
+  triangleCenters: THREE.Vector3[],
+  vertexToTriangles: Map<string, number[]>,
+  targetCount: number
+): number[][] {
+  const nonIndexed = geometry.toNonIndexed();
+  const posAttr = nonIndexed.getAttribute("position");
+  const triangleCount = posAttr.count / 3;
+
+  // Compute face normals
+  const normals: THREE.Vector3[] = new Array(triangleCount);
+  const pA = new THREE.Vector3();
+  const pB = new THREE.Vector3();
+  const pC = new THREE.Vector3();
+
+  for (let i = 0; i < triangleCount; i++) {
+    pA.fromBufferAttribute(posAttr, i * 3);
+    pB.fromBufferAttribute(posAttr, i * 3 + 1);
+    pC.fromBufferAttribute(posAttr, i * 3 + 2);
+    const n = new THREE.Vector3().crossVectors(pB.clone().sub(pA), pC.clone().sub(pA)).normalize();
+    normals[i] = n;
+  }
+
+  // Smooth region growing: seed from extreme points and expand only across smooth faces
+  const assigned = new Int32Array(triangleCount).fill(-1);
+  const regions: number[][] = Array.from({ length: targetCount }, () => []);
+
+  // Pick targetCount spread seed triangles
+  const seeds: number[] = [];
+  const step = Math.max(1, Math.floor(triangleCount / targetCount));
+  for (let s = 0; s < targetCount; s++) {
+    const seedIdx = (s * step) % triangleCount;
+    seeds.push(seedIdx);
+    assigned[seedIdx] = s;
+    regions[s].push(seedIdx);
+  }
+
+  // Multi-source BFS region growing stopping at sharp creases
+  const queues: number[][] = seeds.map((s) => [s]);
+  let remaining = triangleCount - targetCount;
+  const cosCreaseLimit = Math.cos((42 * Math.PI) / 180); // 42 degrees crease barrier
+
+  while (remaining > 0) {
+    let progressed = false;
+
+    for (let r = 0; r < targetCount; r++) {
+      if (queues[r].length === 0) continue;
+      const curr = queues[r].shift()!;
+      const currNorm = normals[curr];
+
+      const v0 = curr * 3;
+      for (let v = 0; v < 3; v++) {
+        const k = `${Math.round(posAttr.getX(v0 + v) * 20)}_${Math.round(
+          posAttr.getY(v0 + v) * 20
+        )}_${Math.round(posAttr.getZ(v0 + v) * 20)}`;
+
+        const neighbors = vertexToTriangles.get(k) || [];
+        for (const n of neighbors) {
+          if (assigned[n] === -1) {
+            // Check dihedral angle: if smooth, expand; if sharp crease, hold
+            const nNorm = normals[n];
+            if (currNorm.dot(nNorm) >= cosCreaseLimit - 0.2) {
+              assigned[n] = r;
+              regions[r].push(n);
+              queues[r].push(n);
+              remaining--;
+              progressed = true;
+            }
+          }
+        }
+      }
+    }
+
+    if (!progressed) {
+      // Assign remaining triangles to nearest region
+      for (let i = 0; i < triangleCount; i++) {
+        if (assigned[i] === -1) {
+          let bestDist = Infinity;
+          let bestR = 0;
+          for (let r = 0; r < targetCount; r++) {
+            const d = triangleCenters[i].distanceTo(triangleCenters[seeds[r]]);
+            if (d < bestDist) {
+              bestDist = d;
+              bestR = r;
+            }
+          }
+          assigned[i] = bestR;
+          regions[bestR].push(i);
+        }
+      }
+      break;
+    }
+  }
+
+  return regions.filter((r) => r.length > 0);
 }

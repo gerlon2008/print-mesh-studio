@@ -3,18 +3,16 @@
 import React, { useState } from "react";
 import {
   Sparkles,
-  Layers,
   Sliders,
   Eye,
   EyeOff,
   Box,
-  CheckCircle2,
-  Trash2,
   Cpu,
-  Download,
-  Flame,
+  Layers,
+  Merge,
+  RotateCcw,
 } from "lucide-react";
-import { TripoDetectedPart, SegmentationTier } from "../../utils/tripoSegmentation";
+import { TripoDetectedPart, SegmentationTier, SegmentationMode } from "../../utils/tripoSegmentation";
 
 interface TripoSegmentationTabProps {
   detectedParts: TripoDetectedPart[];
@@ -22,7 +20,7 @@ interface TripoSegmentationTabProps {
   onSelectPart: (id: string | null) => void;
   explodedDistance: number;
   onChangeExplodedDistance: (dist: number) => void;
-  onRunTripoSegmentation: (tier: SegmentationTier) => void;
+  onRunTripoSegmentation: (tier: SegmentationTier, mode: SegmentationMode) => void;
   onUpdatePartColor: (partId: string, newColor: string) => void;
   onTogglePartVisibility: (partId: string) => void;
   onGenerateConnectorsBetweenParts: () => void;
@@ -46,10 +44,11 @@ export const TripoSegmentationTab: React.FC<TripoSegmentationTabProps> = ({
   totalTriangles,
 }) => {
   const [selectedTier, setSelectedTier] = useState<SegmentationTier>("balanced");
+  const [selectedMode, setSelectedMode] = useState<SegmentationMode>("islands");
   const [isGeneratingConnectors, setIsGeneratingConnectors] = useState(false);
 
   const handleRun = () => {
-    onRunTripoSegmentation(selectedTier);
+    onRunTripoSegmentation(selectedTier, selectedMode);
   };
 
   const handleConnectors = () => {
@@ -65,38 +64,43 @@ export const TripoSegmentationTab: React.FC<TripoSegmentationTabProps> = ({
       <div>
         <div className="flex items-center gap-1.5 text-zinc-100 font-semibold text-sm">
           <Sparkles className="w-4 h-4 text-cyan-400" />
-          <span>Detección de Partes (Estilo Tripo AI)</span>
+          <span>Detección de Partes Naturales (Bambu / Tripo)</span>
         </div>
         <p className="text-zinc-400 text-[11px] mt-0.5">
-          Segmenta la geometría completa en componentes funcionales según curvaturas, estrangulamientos
-          y puntos de unión anatómicos/mecánicos.
+          Identifica y separa automáticamente las piezas reales del modelo (gafas, ropa, cuerpo,
+          cadenas, accesorios) <strong>sin romper la geometría</strong>.
         </p>
       </div>
 
-      {/* Tier Selector (Simple / Balanced / Detailed) */}
+      {/* Detection Mode */}
       <div className="bg-zinc-900/70 p-3 rounded-xl border border-zinc-800 space-y-2.5">
         <label className="text-zinc-200 font-medium text-[11px]">
-          Nivel de Profundidad del Despiece:
+          Método de Detección:
         </label>
-        <div className="grid grid-cols-3 gap-1.5">
-          {[
-            { id: "simple", label: "Simple", desc: "3-5 partes" },
-            { id: "balanced", label: "Equilibrado", desc: "6-9 partes" },
-            { id: "detailed", label: "Detallado", desc: "10-14 partes" },
-          ].map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setSelectedTier(t.id as SegmentationTier)}
-              className={`p-2 rounded-lg border text-center transition-all ${
-                selectedTier === t.id
-                  ? "bg-cyan-950/80 border-cyan-500 text-cyan-200 shadow-sm"
-                  : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              <div className="font-semibold text-[11px]">{t.label}</div>
-              <div className="text-[9px] text-zinc-500 mt-0.5">{t.desc}</div>
-            </button>
-          ))}
+        <div className="grid grid-cols-2 gap-1.5">
+          <button
+            onClick={() => setSelectedMode("islands")}
+            className={`p-2 rounded-lg border text-left transition-all ${
+              selectedMode === "islands"
+                ? "bg-cyan-950/80 border-cyan-500 text-cyan-200 shadow-sm"
+                : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            <div className="font-semibold text-[11px]">Objetos e Islas (Recomendado)</div>
+            <div className="text-[9px] text-zinc-500 mt-0.5">Extrae gafas, ropa, accesorios intactos</div>
+          </button>
+
+          <button
+            onClick={() => setSelectedMode("creases")}
+            className={`p-2 rounded-lg border text-left transition-all ${
+              selectedMode === "creases"
+                ? "bg-cyan-950/80 border-cyan-500 text-cyan-200 shadow-sm"
+                : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            <div className="font-semibold text-[11px]">Por Pliegues y Bordes</div>
+            <div className="text-[9px] text-zinc-500 mt-0.5">Para mallas de un solo cuerpo unificado</div>
+          </button>
         </div>
 
         <button
@@ -107,12 +111,12 @@ export const TripoSegmentationTab: React.FC<TripoSegmentationTabProps> = ({
           {isProcessing ? (
             <>
               <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              <span>Analizando Geometría y Estrangulamientos...</span>
+              <span>Identificando Componentes Naturales...</span>
             </>
           ) : (
             <>
               <Sparkles className="w-4 h-4" />
-              <span>Segmentar Modelo en Partes (Tripo AI)</span>
+              <span>Detectar Partes del Objeto</span>
             </>
           )}
         </button>
@@ -140,8 +144,8 @@ export const TripoSegmentationTab: React.FC<TripoSegmentationTabProps> = ({
           />
 
           <div className="flex justify-between text-[10px] text-zinc-500 font-mono">
-            <span>0 mm (Ensamble)</span>
-            <span>30 mm (Vista media)</span>
+            <span>0 mm (Ensamblado)</span>
+            <span>25 mm (Separado)</span>
             <span>60 mm (Despiece total)</span>
           </div>
         </div>
@@ -151,16 +155,17 @@ export const TripoSegmentationTab: React.FC<TripoSegmentationTabProps> = ({
       {detectedParts.length > 0 && (
         <div className="space-y-2.5">
           <div className="flex items-center justify-between text-zinc-200 font-medium">
-            <span>Componentes Detectados ({detectedParts.length})</span>
+            <span>Piezas Detectadas ({detectedParts.length})</span>
             <button
               onClick={onResetSegmentation}
-              className="text-[10px] text-zinc-500 hover:text-red-400 transition-colors"
+              className="text-[10px] text-zinc-500 hover:text-red-400 transition-colors flex items-center gap-1"
             >
-              Restablecer modelo
+              <RotateCcw className="w-3 h-3" />
+              <span>Restablecer</span>
             </button>
           </div>
 
-          <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+          <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
             {detectedParts.map((part) => {
               const isSelected = part.id === selectedPartId;
               const percent = totalTriangles > 0
@@ -173,7 +178,7 @@ export const TripoSegmentationTab: React.FC<TripoSegmentationTabProps> = ({
                   onClick={() => onSelectPart(part.id)}
                   className={`flex items-center justify-between p-2 rounded-lg border transition-all cursor-pointer text-[11px] ${
                     isSelected
-                      ? "bg-cyan-950/60 border-cyan-500 shadow-sm"
+                      ? "bg-cyan-950/70 border-cyan-500 shadow-sm"
                       : "bg-zinc-900 border-zinc-800 hover:border-zinc-700"
                   }`}
                 >
@@ -189,7 +194,7 @@ export const TripoSegmentationTab: React.FC<TripoSegmentationTabProps> = ({
                     <div className="truncate max-w-[170px]">
                       <div className="font-medium text-zinc-100 truncate">{part.name}</div>
                       <div className="text-[10px] text-zinc-500 font-mono">
-                        {part.stats.triangleCount.toLocaleString()} tris ({percent}%) | {part.stats.volumeCm3} cm³
+                        {part.stats.triangleCount.toLocaleString()} tris ({percent}%)
                       </div>
                     </div>
                   </div>
@@ -221,7 +226,7 @@ export const TripoSegmentationTab: React.FC<TripoSegmentationTabProps> = ({
             {isGeneratingConnectors ? (
               <>
                 <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                <span>Generando orificios y pasadores...</span>
+                <span>Creando pasadores y orificios de ensamble...</span>
               </>
             ) : (
               <>

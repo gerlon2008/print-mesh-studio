@@ -8,7 +8,7 @@ import { TripoSegmentationTab } from "./TripoSegmentationTab";
 import { CuttingAndConnectorsTab } from "./CuttingAndConnectorsTab";
 import { ColorSegmentationTab } from "./ColorSegmentationTab";
 import { ExportTab } from "./ExportTab";
-import { TripoDetectedPart, SegmentationTier } from "../../utils/tripoSegmentation";
+import { TripoDetectedPart, SegmentationTier, SegmentationMode } from "../../utils/tripoSegmentation";
 import {
   CutPlaneConfig,
   ConnectorPin,
@@ -28,7 +28,7 @@ interface SidebarProps {
   onSelectPart: (id: string | null) => void;
   explodedDistance: number;
   onChangeExplodedDistance: (dist: number) => void;
-  onRunTripoSegmentation: (tier: SegmentationTier) => void;
+  onRunTripoSegmentation: (tier: SegmentationTier, mode?: SegmentationMode) => void;
   onUpdatePartColor: (partId: string, col: string) => void;
   onTogglePartVisibility: (partId: string) => void;
   onGenerateConnectorsBetweenParts: () => void;
